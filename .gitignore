@@ -1,0 +1,25 @@
+# ---- Secrets: never upload ----
+**/application.properties
+**/firebase-service-account.json
+**/google-services.json
+**/local.properties
+
+# ---- Node / frontend ----
+**/node_modules/
+**/dist/
+
+# ---- Java / backend build ----
+**/target/
+
+# ---- Android build ----
+**/build/
+**/.gradle/
+**/.idea/
+**/*.iml
+
+# ---- Database files ----
+**/*.mv.db
+**/*.trace.db
+
+# ---- Misc ----
+**/.DS_Store
