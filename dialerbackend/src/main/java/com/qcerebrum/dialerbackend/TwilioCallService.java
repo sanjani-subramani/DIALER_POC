@@ -9,9 +9,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.logging.Logger;
 
 @Service
 public class TwilioCallService {
+
+    private static final Logger log = Logger.getLogger(TwilioCallService.class.getName());
 
     private final CallLogRepository callLogRepo;
     private final AgentRepository agentRepo;
@@ -73,6 +76,62 @@ public class TwilioCallService {
 
         log.setProviderCallSid(call.getSid());
         return callLogRepo.save(log);
+    }
+
+    public CallLog refreshCallStatus(Long callLogId) {
+        CallLog callLog = callLogRepo.findById(callLogId)
+            .orElseThrow(() -> new RuntimeException("CallLog not found: " + callLogId));
+
+        if (callLog.getProviderCallSid() == null) {
+            return callLog;
+        }
+
+        // Fetch the agent-leg (parent call)
+        Call agentLeg = Call.fetcher(callLog.getProviderCallSid()).fetch();
+
+        // Fetch the customer (child) leg — the leg dialed by the <Dial> verb
+        Call customerLeg = null;
+        ResourceSet<Call> childCalls = Call.reader()
+            .setParentCallSid(callLog.getProviderCallSid())
+            .read();
+        for (Call c : childCalls) {
+            customerLeg = c;
+            break;
+        }
+
+        // Prefer customer leg status since the goal is to show whether the customer picked up
+        String rawStatus = customerLeg != null
+            ? customerLeg.getStatus().toString().toLowerCase()
+            : agentLeg.getStatus().toString().toLowerCase();
+
+        String friendlyStatus = toFriendlyStatus(rawStatus);
+        callLog.setStatus(friendlyStatus);
+
+        if (isFinalStatus(friendlyStatus) && callLog.getEndTime() == null) {
+            callLog.setEndTime(LocalDateTime.now());
+        }
+
+        return callLogRepo.save(callLog);
+    }
+
+    private String toFriendlyStatus(String twilioStatus) {
+        return switch (twilioStatus) {
+            case "queued", "initiated" -> "DIALING";
+            case "ringing" -> "RINGING";
+            case "in-progress" -> "IN_PROGRESS";
+            case "completed" -> "COMPLETED";
+            case "no-answer" -> "NO_ANSWER";
+            case "busy" -> "BUSY";
+            case "failed", "canceled" -> "FAILED";
+            default -> "DIALING";
+        };
+    }
+
+    static boolean isFinalStatus(String friendlyStatus) {
+        return switch (friendlyStatus) {
+            case "COMPLETED", "NO_ANSWER", "BUSY", "FAILED" -> true;
+            default -> false;
+        };
     }
 
     public CallLog checkAndAttachRecording(Long callLogId) {
