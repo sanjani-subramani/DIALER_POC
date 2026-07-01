@@ -58,8 +58,12 @@ public class TwilioCallService {
             return null;
         }
 
+        String agentPhone = agent.getAgentPhoneNumber();
+        String callerId = (agentPhone != null && !agentPhone.isBlank()) ? agentPhone : fromNumber;
+        log.info("placeBridgeCall: using callerId=" + callerId + " for customer leg to " + customerNumber);
+
         String twimlXml = "<Response><Say>Connecting you to the customer now.</Say>" +
-            "<Dial record=\"record-from-answer\">" + customerNumber + "</Dial></Response>";
+                "<Dial record=\"record-from-answer\" callerId=\"" + fromNumber + "\">" + customerNumber + "</Dial></Response>";
 
         CallLog log = new CallLog();
         log.setAgentId(agentId);
