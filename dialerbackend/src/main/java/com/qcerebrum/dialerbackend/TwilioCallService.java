@@ -80,6 +80,7 @@ public class TwilioCallService {
         log.info("placeBridgeCall: using callerId=" + callerId + " for customer leg to " + customerNumber);
 
         String twimlXml = "<Response><Say>Connecting you to the customer now.</Say>" +
+                "<Say voice=\"Polly.Joanna\">This call may be recorded for quality and training purposes.</Say>" +
                 "<Dial record=\"record-from-answer\" callerId=\"" + fromNumber + "\">" + customerNumber + "</Dial></Response>";
 
         CallLog log = new CallLog();
