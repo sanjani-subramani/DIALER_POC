@@ -21,6 +21,7 @@ public class CallLog {
     private LocalDateTime endTime;
     private String providerCallSid;
     private String twilioRecordingSid;
+    private String localFilePath;    // path to locally saved .mp3 copy of the recording (additive, nullable)
 
     // ---- Getters and setters ----
 
@@ -50,4 +51,7 @@ public class CallLog {
 
     public String getTwilioRecordingSid() { return twilioRecordingSid; }
     public void setTwilioRecordingSid(String twilioRecordingSid) { this.twilioRecordingSid = twilioRecordingSid; }
+
+    public String getLocalFilePath() { return localFilePath; }
+    public void setLocalFilePath(String localFilePath) { this.localFilePath = localFilePath; }
 }

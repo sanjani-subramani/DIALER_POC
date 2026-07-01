@@ -6,8 +6,16 @@ import com.twilio.rest.api.v2010.account.Recording;
 import com.twilio.type.PhoneNumber;
 import com.twilio.type.Twiml;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.util.logging.Logger;
 
@@ -21,6 +29,15 @@ public class TwilioCallService {
 
     @Value("${twilio.from-number}")
     private String fromNumber;
+
+    @Value("${twilio.account-sid}")
+    private String accountSid;
+
+    @Value("${twilio.auth-token}")
+    private String authToken;
+
+    @Value("${recording.storage.path:C:/Users/sanja/dialer-recordings/}")
+    private String recordingStoragePath;
 
     public TwilioCallService(CallLogRepository callLogRepo, AgentRepository agentRepo) {
         this.callLogRepo = callLogRepo;
@@ -155,9 +172,43 @@ public class TwilioCallService {
             log.setStatus("COMPLETED");
             log.setEndTime(LocalDateTime.now());
             log.setRecordingUrl("http://localhost:8080/api/recordings/" + callLogId);
+
+            // ADDITIVE: also save a local .mp3 copy. Failure here must never break the
+            // existing recordingUrl flow above, so it's fully self-contained and swallows errors.
+            downloadAndSaveRecordingLocally(log, rec.getSid());
+
             return callLogRepo.save(log);
         }
 
         return log;
+    }
+
+    private void downloadAndSaveRecordingLocally(CallLog callLog, String recordingSid) {
+        try {
+            String twilioMp3Url = "https://api.twilio.com/2010-04-01/Accounts/" + accountSid
+                + "/Recordings/" + recordingSid + ".mp3";
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setBasicAuth(accountSid, authToken);
+            HttpEntity<Void> entity = new HttpEntity<>(headers);
+
+            RestTemplate restTemplate = new RestTemplate();
+            ResponseEntity<byte[]> response = restTemplate.exchange(twilioMp3Url, HttpMethod.GET, entity, byte[].class);
+
+            byte[] bytes = response.getBody();
+            if (bytes == null || bytes.length == 0) {
+                throw new IllegalStateException("Empty response body when downloading recording from Twilio");
+            }
+
+            Path dir = Paths.get(recordingStoragePath);
+            Files.createDirectories(dir);
+            Path filePath = dir.resolve("call_" + callLog.getId() + ".mp3");
+            Files.write(filePath, bytes);
+
+            callLog.setLocalFilePath(filePath.toAbsolutePath().toString());
+        } catch (Exception e) {
+            TwilioCallService.log.warning("Local recording save failed for callLogId=" + callLog.getId()
+                + ", recordingSid=" + recordingSid + ": " + e.getMessage());
+        }
     }
 }

@@ -4,12 +4,19 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Map;
+import java.util.Optional;
 
 @RestController
 @CrossOrigin(origins = "*")
@@ -73,5 +80,42 @@ public class TwilioController {
         return ResponseEntity.ok()
             .contentType(MediaType.parseMediaType("audio/mpeg"))
             .body(response.getBody());
+    }
+
+    // ADDITIVE: serves the locally saved .mp3 copy from disk, if one exists.
+    // Does not touch the existing /api/recordings/{id} endpoint above.
+    @GetMapping("/api/recordings/local/{callLogId}")
+    public ResponseEntity<byte[]> streamLocalRecording(@PathVariable Long callLogId) {
+        Optional<CallLog> logOpt = callLogRepo.findById(callLogId);
+        if (logOpt.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .contentType(MediaType.TEXT_PLAIN)
+                .body(("No call log with id " + callLogId).getBytes(StandardCharsets.UTF_8));
+        }
+
+        String localFilePath = logOpt.get().getLocalFilePath();
+        if (localFilePath == null || localFilePath.isBlank()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .contentType(MediaType.TEXT_PLAIN)
+                .body(("No local recording file found for callLogId " + callLogId).getBytes(StandardCharsets.UTF_8));
+        }
+
+        Path path = Paths.get(localFilePath);
+        if (!Files.exists(path)) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .contentType(MediaType.TEXT_PLAIN)
+                .body(("Local recording file not found on disk for callLogId " + callLogId).getBytes(StandardCharsets.UTF_8));
+        }
+
+        try {
+            byte[] bytes = Files.readAllBytes(path);
+            return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType("audio/mpeg"))
+                .body(bytes);
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .contentType(MediaType.TEXT_PLAIN)
+                .body(("Failed to read local recording file: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
+        }
     }
 }
