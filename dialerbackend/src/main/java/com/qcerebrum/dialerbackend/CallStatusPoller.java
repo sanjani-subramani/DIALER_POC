@@ -11,10 +11,10 @@ public class CallStatusPoller {
 
     private static final Logger log = Logger.getLogger(CallStatusPoller.class.getName());
 
-    private final TwilioCallService twilioCallService;
+    private final TelephonyProvider twilioCallService;
     private final CallLogRepository callLogRepo;
 
-    public CallStatusPoller(TwilioCallService twilioCallService, CallLogRepository callLogRepo) {
+    public CallStatusPoller(TelephonyProvider twilioCallService, CallLogRepository callLogRepo) {
         this.twilioCallService = twilioCallService;
         this.callLogRepo = callLogRepo;
     }

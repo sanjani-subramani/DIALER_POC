@@ -10,7 +10,6 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
-import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.nio.file.Files;
@@ -19,8 +18,7 @@ import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.util.logging.Logger;
 
-@Service
-public class TwilioCallService {
+public class TwilioCallService implements TelephonyProvider {
 
     private static final Logger log = Logger.getLogger(TwilioCallService.class.getName());
 

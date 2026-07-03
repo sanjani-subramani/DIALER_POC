@@ -22,7 +22,7 @@ import java.util.Optional;
 @CrossOrigin(origins = "*")
 public class TwilioController {
 
-    private final TwilioCallService twilioCallService;
+    private final TelephonyProvider twilioCallService;
     private final CallLogRepository callLogRepo;
 
     @Value("${twilio.account-sid}")
@@ -31,7 +31,7 @@ public class TwilioController {
     @Value("${twilio.auth-token}")
     private String authToken;
 
-    public TwilioController(TwilioCallService twilioCallService, CallLogRepository callLogRepo) {
+    public TwilioController(TelephonyProvider twilioCallService, CallLogRepository callLogRepo) {
         this.twilioCallService = twilioCallService;
         this.callLogRepo = callLogRepo;
     }
