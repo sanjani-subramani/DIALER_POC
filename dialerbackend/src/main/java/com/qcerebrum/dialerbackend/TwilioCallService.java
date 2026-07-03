@@ -39,6 +39,9 @@ public class TwilioCallService {
     @Value("${recording.storage.path:C:/Users/sanja/dialer-recordings/}")
     private String recordingStoragePath;
 
+    @Value("${app.base-url:http://localhost:8080}")
+    private String appBaseUrl;
+
     public TwilioCallService(CallLogRepository callLogRepo, AgentRepository agentRepo) {
         this.callLogRepo = callLogRepo;
         this.agentRepo = agentRepo;

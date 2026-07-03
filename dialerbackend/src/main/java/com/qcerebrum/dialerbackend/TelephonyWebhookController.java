@@ -70,4 +70,12 @@ public class TelephonyWebhookController {
                 "recordingUrl", log.getRecordingUrl()
         );
     }
+
+    // --- Twilio calls THIS when the customer leg answers, via <Number url="..."> ---
+    // Plays the recording notice to the customer before they're bridged to the agent.
+    // Twilio may request this via GET or POST.
+    @RequestMapping(value = "/consent-whisper", method = { RequestMethod.GET, RequestMethod.POST }, produces = "text/xml")
+    public String consentWhisper() {
+        return "<Response><Say voice=\"Polly.Joanna\">This call is being recorded.</Say></Response>";
+    }
 }
