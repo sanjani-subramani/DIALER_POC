@@ -1,6 +1,10 @@
 import { useState, useEffect } from "react";
 
 const API = "http://localhost:8080/api";
+const BACKEND_ORIGIN = API.replace(/\/api$/, "");
+
+const resolveRecordingUrl = (url) =>
+  !url ? url : (url.startsWith("http") ? url : `${BACKEND_ORIGIN}${url}`);
 
 /* ------------------------------------------------------------------ */
 /*  Role definitions                                                   */
@@ -537,7 +541,7 @@ function App() {
                     </div>
                     <div className="mt-3">
                       {c.recordingUrl ? (
-                        <audio controls src={c.recordingUrl} className="w-full h-9" />
+                        <audio controls src={resolveRecordingUrl(c.recordingUrl)} className="w-full h-9" />
                       ) : (
                         <button onClick={() => checkRecording(c.id)} disabled={checkingId === c.id} className={`text-sm font-medium ${th.checkBtn} rounded-lg px-3 py-1.5 transition disabled:opacity-50`}>
                           {checkingId === c.id ? "Checking…" : "Check recording"}

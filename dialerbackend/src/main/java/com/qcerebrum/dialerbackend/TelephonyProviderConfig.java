@@ -13,7 +13,7 @@ public class TelephonyProviderConfig {
     @Bean
     public TelephonyProvider telephonyProvider(CallLogRepository callLogRepo, AgentRepository agentRepo) {
         if ("telecmi".equalsIgnoreCase(telephonyProvider)) {
-            return new TelecmiCallService();
+            return new TelecmiCallService(callLogRepo, agentRepo);
         }
         return new TwilioCallService(callLogRepo, agentRepo);
     }
