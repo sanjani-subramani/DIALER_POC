@@ -9,4 +9,7 @@ public interface TelephonyProvider {
     CallLog refreshCallStatus(Long callLogId);
 
     CallLog checkAndAttachRecording(Long callLogId);
+
+    default void syncIncomingCalls() {
+    }
 }

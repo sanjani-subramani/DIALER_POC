@@ -8,11 +8,13 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,6 +40,7 @@ public class TelecmiCallService implements TelephonyProvider {
 
     private final CallLogRepository callLogRepo;
     private final AgentRepository agentRepo;
+    private final FirebaseStorageService firebaseStorageService;
 
     @Value("${telecmi.appid}")
     private String appId;
@@ -57,9 +60,11 @@ public class TelecmiCallService implements TelephonyProvider {
     @Value("${recording.storage.path:C:/Users/sanja/dialer-recordings/}")
     private String recordingStoragePath;
 
-    public TelecmiCallService(CallLogRepository callLogRepo, AgentRepository agentRepo) {
+    public TelecmiCallService(CallLogRepository callLogRepo, AgentRepository agentRepo,
+                               FirebaseStorageService firebaseStorageService) {
         this.callLogRepo = callLogRepo;
         this.agentRepo = agentRepo;
+        this.firebaseStorageService = firebaseStorageService;
     }
 
     @Override
@@ -80,6 +85,7 @@ public class TelecmiCallService implements TelephonyProvider {
         }
 
         CallLog callLog = new CallLog();
+        callLog.setDirection("OUTGOING");
         callLog.setAgentId(agentId);
         callLog.setCustomerNumber(customerNumber);
         callLog.setStatus("DIALING");
@@ -160,20 +166,43 @@ public class TelecmiCallService implements TelephonyProvider {
             return callLog;
         }
 
-        boolean olderThanTwoMinutes = callLog.getStartTime().isBefore(LocalDateTime.now().minusMinutes(2));
-        if (!olderThanTwoMinutes) {
-            return callLog;
+        // With the CDR time-gate and cmiuid dedup in checkAndAttachRecording, it's safe to check
+        // on every poll (poller runs every ~4s) instead of waiting 2 minutes before the first
+        // check. A recording (or a missed-call CDR) appearing in TeleCMI is our only signal that
+        // the call finished — checkAndAttachRecording moves status to COMPLETED/NO_ANSWER on a
+        // match and otherwise leaves it as-is.
+        callLog = checkAndAttachRecording(callLogId);
+
+        String updatedStatus = callLog.getStatus();
+        boolean stillUnresolved = "DIALING".equals(updatedStatus) || "RINGING".equals(updatedStatus) || "IN_PROGRESS".equals(updatedStatus);
+        boolean olderThanFiveMinutes = callLog.getStartTime().isBefore(LocalDateTime.now().minusMinutes(5));
+
+        if (stillUnresolved && olderThanFiveMinutes) {
+            // Safety net: never leave a call stuck in DIALING/RINGING/IN_PROGRESS forever if both
+            // CDR APIs miss it for whatever reason.
+            log.info("TeleCMI: callLogId=" + callLogId + " still unresolved after 5 minutes — forcing NO_ANSWER as a safety net.");
+            callLog.setStatus("NO_ANSWER");
+            if (callLog.getEndTime() == null) {
+                callLog.setEndTime(LocalDateTime.now());
+            }
+            callLog = callLogRepo.save(callLog);
         }
 
-        // A recording appearing in TeleCMI's CDR is our only signal that the call finished —
-        // checkAndAttachRecording moves status to COMPLETED on a match and otherwise leaves it as-is.
-        return checkAndAttachRecording(callLogId);
+        return callLog;
     }
 
     @Override
     public CallLog checkAndAttachRecording(Long callLogId) {
         CallLog callLog = callLogRepo.findById(callLogId)
             .orElseThrow(() -> new RuntimeException("CallLog not found: " + callLogId));
+
+        // Final states must never be reprocessed or overwritten, even via the manual
+        // check-recording endpoint — e.g. an /answered CDR from a later, unrelated inbound call
+        // must not clobber a CallLog that's already settled as NO_ANSWER or FAILED.
+        String existingStatus = callLog.getStatus();
+        if ("NO_ANSWER".equals(existingStatus) || "FAILED".equals(existingStatus)) {
+            return callLog;
+        }
 
         if (callLog.getLocalFilePath() != null && !callLog.getLocalFilePath().isBlank()) {
             return callLog;
@@ -188,33 +217,48 @@ public class TelecmiCallService implements TelephonyProvider {
         String targetNumber = normalizeNumber(callLog.getCustomerNumber());
         long targetStartMillis = callLog.getStartTime().toInstant(ZoneOffset.UTC).toEpochMilli();
 
-        // Follow-me click2call legs get classified by TeleCMI as an INCOMING answered call (the
-        // agent's phone "picks up" first), so out_answered alone often returns count=0. Try the
-        // outbound CDR endpoint first, then fall back to the incoming/answered endpoint.
+        // Time gate: a CDR from before this call started (beyond a little clock-skew tolerance)
+        // can never belong to it — without this, a stale CDR from an earlier call to the same
+        // number gets re-attached to every subsequent CallLog.
+        long minAllowedCdrTimeMillis = callLog.getStartTime().atZone(ZoneId.systemDefault()).toInstant().toEpochMilli() - 60_000L;
+        // Dedup: a CDR already claimed by another CallLog (via its cmiuid) must never match again,
+        // except the CDR this CallLog already claimed itself (idempotent re-check).
+        String ownCmiuid = callLog.getTwilioRecordingSid();
+
+        // /answered is inbound-only (see syncIncomingCalls) and must never be consulted here —
+        // matching an unrelated inbound CDR onto an outbound CallLog is exactly the bug this
+        // sequence used to have. Outbound resolution is out_answered, then out_missed only.
         Map<?, ?> bestMatch = null;
         String matchedEndpoint = null;
 
         Map<?, ?> outAnsweredBody = queryCdrEndpoint("/out_answered", startEpochMillis, endEpochMillis, callLogId);
         if (outAnsweredBody != null && outAnsweredBody.get("cdr") instanceof List<?> outCdrList) {
-            bestMatch = selectBestCdrMatch(outCdrList, targetNumber, targetStartMillis);
+            bestMatch = selectBestCdrMatch(outCdrList, targetNumber, targetStartMillis, minAllowedCdrTimeMillis, ownCmiuid);
             if (bestMatch != null) {
                 matchedEndpoint = "out_answered";
             }
         }
 
         if (bestMatch == null) {
-            Map<?, ?> answeredBody = queryCdrEndpoint("/answered", startEpochMillis, endEpochMillis, callLogId);
-            if (answeredBody != null && answeredBody.get("cdr") instanceof List<?> inCdrList) {
-                bestMatch = selectBestCdrMatch(inCdrList, targetNumber, targetStartMillis);
-                if (bestMatch != null) {
-                    matchedEndpoint = "answered";
+            Map<?, ?> missedBody = queryCdrEndpoint("/out_missed", startEpochMillis, endEpochMillis, callLogId);
+            if (missedBody != null && missedBody.get("cdr") instanceof List<?> missedCdrList) {
+                Map<?, ?> missedMatch = selectBestMissedMatch(missedCdrList, targetNumber, targetStartMillis, minAllowedCdrTimeMillis, ownCmiuid);
+                if (missedMatch != null) {
+                    log.info("TeleCMI: matched out_missed CDR for callLogId=" + callLogId + ", marking NO_ANSWER");
+                    Object missedCmiuidObj = missedMatch.get("cmiuid");
+                    callLog.setTwilioRecordingSid(missedCmiuidObj != null ? missedCmiuidObj.toString() : null);
+                    callLog.setStatus("NO_ANSWER");
+                    if (callLog.getEndTime() == null) {
+                        callLog.setEndTime(LocalDateTime.now());
+                    }
+                    return callLogRepo.save(callLog);
                 }
             }
         }
 
         if (bestMatch == null) {
             log.info("TeleCMI: no CDR record matched customerNumber=" + callLog.getCustomerNumber()
-                + " for callLogId=" + callLogId + " on /out_answered or /answered — recording may not be ready yet.");
+                + " for callLogId=" + callLogId + " on /out_answered or /out_missed — recording may not be ready yet.");
             return callLog;
         }
 
@@ -242,7 +286,73 @@ public class TelecmiCallService implements TelephonyProvider {
         // and swallows errors.
         downloadAndSaveRecordingLocally(callLog, filename);
 
+        if (callLog.getLocalFilePath() != null && !callLog.getLocalFilePath().isBlank()) {
+            File localFile = new File(callLog.getLocalFilePath());
+            String fbUrl = firebaseStorageService.uploadRecording(callLog.getId(), localFile);
+            if (fbUrl != null) {
+                callLog.setFirebaseUrl(fbUrl);
+            }
+        }
+
         return callLogRepo.save(callLog);
+    }
+
+    @Override
+    public void syncIncomingCalls() {
+        long startEpochMillis = LocalDateTime.now().minusMinutes(15).toInstant(ZoneOffset.UTC).toEpochMilli();
+        long endEpochMillis = LocalDateTime.now().toInstant(ZoneOffset.UTC).toEpochMilli();
+
+        Map<?, ?> answeredBody = queryCdrEndpoint("/answered", startEpochMillis, endEpochMillis, null);
+        if (answeredBody == null || !(answeredBody.get("cdr") instanceof List<?> cdrList)) {
+            return;
+        }
+
+        for (Object item : cdrList) {
+            if (!(item instanceof Map<?, ?> cdr)) {
+                continue;
+            }
+
+            Object cmiuidObj = cdr.get("cmiuid");
+            if (cmiuidObj == null) {
+                continue;
+            }
+            String cmiuid = cmiuidObj.toString();
+
+            if (callLogRepo.existsByTwilioRecordingSid(cmiuid)) {
+                continue; // already known — either a prior sync pass or matched elsewhere
+            }
+
+            Object fromObj = cdr.get("from");
+            Object agentObj = cdr.get("agent");
+            long cdrTimeMillis = parseLongSafely(cdr.get("time"), 0L);
+            long billedsec = parseLongSafely(cdr.get("billedsec"), 0L);
+
+            CallLog callLog = new CallLog();
+            callLog.setDirection("INCOMING");
+            callLog.setCustomerNumber(fromObj != null ? normalizeNumber(fromObj.toString()) : null);
+            callLog.setAgentId(agentObj != null ? agentObj.toString() : null);
+            callLog.setStatus("COMPLETED");
+            callLog.setTwilioRecordingSid(cmiuid);
+            callLog.setProviderCallSid(cmiuid);
+            callLog.setStartTime(cdrTimeMillis > 0 ? epochMillisToLocalDateTime(cdrTimeMillis) : LocalDateTime.now());
+            callLog.setEndTime(epochMillisToLocalDateTime(cdrTimeMillis + billedsec * 1000L));
+            callLogRepo.save(callLog);
+
+            log.info("TeleCMI inbound sync: created INCOMING CallLog id=" + callLog.getId()
+                + " from=" + callLog.getCustomerNumber());
+
+            Object filenameObj = cdr.get("filename");
+            String filename = filenameObj != null ? filenameObj.toString() : null;
+            if (filename != null && !filename.isBlank()) {
+                downloadAndSaveRecordingLocally(callLog, filename);
+                callLog.setRecordingUrl("/api/recordings/local/" + callLog.getId());
+                callLogRepo.save(callLog);
+            }
+        }
+    }
+
+    private LocalDateTime epochMillisToLocalDateTime(long epochMillis) {
+        return Instant.ofEpochMilli(epochMillis).atZone(ZoneOffset.UTC).toLocalDateTime();
     }
 
     private Map<?, ?> queryCdrEndpoint(String path, long startEpochMillis, long endEpochMillis, Long callLogId) {
@@ -291,7 +401,8 @@ public class TelecmiCallService implements TelephonyProvider {
         return responseBody;
     }
 
-    private Map<?, ?> selectBestCdrMatch(List<?> cdrList, String targetNumber, long targetStartMillis) {
+    private Map<?, ?> selectBestCdrMatch(List<?> cdrList, String targetNumber, long targetStartMillis,
+                                          long minAllowedCdrTimeMillis, String ownCmiuid) {
         Map<?, ?> best = null;
         boolean bestAgentMatch = false;
         long bestDiff = Long.MAX_VALUE;
@@ -299,6 +410,11 @@ public class TelecmiCallService implements TelephonyProvider {
         for (Object item : cdrList) {
             if (!(item instanceof Map<?, ?> cdr)) {
                 continue;
+            }
+
+            long cdrTime = parseLongSafely(cdr.get("time"), Long.MAX_VALUE);
+            if (cdrTime < minAllowedCdrTimeMillis) {
+                continue; // predates this call (beyond clock-skew tolerance) — can't belong to it
             }
 
             Object fromObj = cdr.get("from");
@@ -309,11 +425,13 @@ public class TelecmiCallService implements TelephonyProvider {
                 continue;
             }
 
+            if (!isCdrAvailable(cdr, ownCmiuid)) {
+                continue;
+            }
+
             Object agentObj = cdr.get("agent");
             boolean agentMatches = agentObj != null && userId.equals(agentObj.toString());
 
-            Object timeObj = cdr.get("time");
-            long cdrTime = timeObj != null ? Long.parseLong(timeObj.toString()) : Long.MAX_VALUE;
             long diff = Math.abs(cdrTime - targetStartMillis);
 
             boolean better = best == null
@@ -330,6 +448,49 @@ public class TelecmiCallService implements TelephonyProvider {
         return best;
     }
 
+    private Map<?, ?> selectBestMissedMatch(List<?> cdrList, String targetNumber, long targetStartMillis,
+                                             long minAllowedCdrTimeMillis, String ownCmiuid) {
+        // In out_missed CDRs "from" is our virtual number, not the customer — match on "to" only.
+        Map<?, ?> best = null;
+        long bestDiff = Long.MAX_VALUE;
+
+        for (Object item : cdrList) {
+            if (!(item instanceof Map<?, ?> cdr)) {
+                continue;
+            }
+            long cdrTime = parseLongSafely(cdr.get("time"), Long.MAX_VALUE);
+            if (cdrTime < minAllowedCdrTimeMillis) {
+                continue;
+            }
+            Object toObj = cdr.get("to");
+            if (toObj == null || !targetNumber.equals(normalizeNumber(toObj.toString()))) {
+                continue;
+            }
+            if (!isCdrAvailable(cdr, ownCmiuid)) {
+                continue;
+            }
+            long diff = Math.abs(cdrTime - targetStartMillis);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                best = cdr;
+            }
+        }
+
+        return best;
+    }
+
+    private boolean isCdrAvailable(Map<?, ?> cdr, String ownCmiuid) {
+        Object cmiuidObj = cdr.get("cmiuid");
+        if (cmiuidObj == null) {
+            return true;
+        }
+        String cmiuid = cmiuidObj.toString();
+        if (cmiuid.equals(ownCmiuid)) {
+            return true;
+        }
+        return !callLogRepo.existsByTwilioRecordingSid(cmiuid);
+    }
+
     private LocalDateTime computeEndTimeFromCdr(Map<?, ?> cdr) {
         Object timeObj = cdr.get("time");
         if (timeObj == null) {
@@ -337,8 +498,7 @@ public class TelecmiCallService implements TelephonyProvider {
         }
         long cdrTimeMillis = parseLongSafely(timeObj, 0L);
         long billedsec = parseLongSafely(cdr.get("billedsec"), 0L);
-        long endMillis = cdrTimeMillis + billedsec * 1000L;
-        return Instant.ofEpochMilli(endMillis).atZone(ZoneOffset.UTC).toLocalDateTime();
+        return epochMillisToLocalDateTime(cdrTimeMillis + billedsec * 1000L);
     }
 
     // TeleCMI's CDR endpoints return some numeric fields (e.g. billedsec, rate) as strings and

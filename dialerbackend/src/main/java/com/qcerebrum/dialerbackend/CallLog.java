@@ -22,6 +22,8 @@ public class CallLog {
     private String providerCallSid;
     private String twilioRecordingSid;
     private String localFilePath;    // path to locally saved .mp3 copy of the recording (additive, nullable)
+    private String direction;        // OUTGOING (default) or INCOMING
+    private String firebaseUrl;      // public Firebase Storage URL for the uploaded recording (additive, nullable)
 
     // ---- Getters and setters ----
 
@@ -54,4 +56,10 @@ public class CallLog {
 
     public String getLocalFilePath() { return localFilePath; }
     public void setLocalFilePath(String localFilePath) { this.localFilePath = localFilePath; }
+
+    public String getDirection() { return direction == null ? "OUTGOING" : direction; }
+    public void setDirection(String direction) { this.direction = direction; }
+
+    public String getFirebaseUrl() { return firebaseUrl; }
+    public void setFirebaseUrl(String firebaseUrl) { this.firebaseUrl = firebaseUrl; }
 }

@@ -29,5 +29,11 @@ public class CallStatusPoller {
                 log.warning("Failed to refresh status for CallLog " + callLog.getId() + ": " + e.getMessage());
             }
         }
+
+        try {
+            twilioCallService.syncIncomingCalls();
+        } catch (Exception e) {
+            log.warning("Failed to sync incoming calls: " + e.getMessage());
+        }
     }
 }

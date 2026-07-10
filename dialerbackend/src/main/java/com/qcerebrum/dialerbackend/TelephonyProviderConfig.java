@@ -11,9 +11,10 @@ public class TelephonyProviderConfig {
     private String telephonyProvider;
 
     @Bean
-    public TelephonyProvider telephonyProvider(CallLogRepository callLogRepo, AgentRepository agentRepo) {
+    public TelephonyProvider telephonyProvider(CallLogRepository callLogRepo, AgentRepository agentRepo,
+                                                FirebaseStorageService firebaseStorageService) {
         if ("telecmi".equalsIgnoreCase(telephonyProvider)) {
-            return new TelecmiCallService(callLogRepo, agentRepo);
+            return new TelecmiCallService(callLogRepo, agentRepo, firebaseStorageService);
         }
         return new TwilioCallService(callLogRepo, agentRepo);
     }
